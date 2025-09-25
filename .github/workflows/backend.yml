@@ -1,0 +1,80 @@
+name: backend-ci
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "backend/**"
+      - "compose/**"
+      - ".github/workflows/backend.yml"
+      - "README.md"
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - "backend/**"
+
+permissions:
+  contents: read
+  packages: write   # needed to push to GHCR
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/bugbounty-aio-backend
+
+jobs:
+  test-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build (local) for smoke test
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: backend:test
+
+      - name: Run container
+        run: |
+          docker run -d --rm --name backend-test -p 8000:8000 \
+            -e APP_VERSION=${{ github.sha }} backend:test
+          # wait for it to come up
+          for i in {1..20}; do
+            curl -fsS http://localhost:8000/health && break || sleep 2
+          done
+
+      - name: Smoke check /health
+        run: curl -fsS http://localhost:8000/health | tee /dev/stderr | grep -q '"status":"ok"'
+
+      - name: Stop container
+        if: always()
+        run: docker stop backend-test || true
+
+  push-image:
+    needs: test-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push (GHCR)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
