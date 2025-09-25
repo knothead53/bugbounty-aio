@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+venv/
+env/
+
+# Node
+node_modules/
+
+# Local runs & artifacts
+/runs/
+/tmp/
+/*.log
+
+# Editors
+.vscode/
+
+# Mac
+.DS_Store
