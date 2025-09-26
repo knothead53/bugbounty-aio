@@ -9,7 +9,7 @@ services:
       - "8080:8080"
     volumes:
       - ./data:/data                      # shared host folder for outputs/jobs
-      - /var/run/docker.sock:/var/run/docker.sock:ro  # allow API to control Docker
+      - /var/run/docker.sock:/var/run/docker.sock  # allow API to control Docker
     restart: unless-stopped
 
   # Optional idle containers for ProjectDiscovery tools (shown as sleep infinity).
