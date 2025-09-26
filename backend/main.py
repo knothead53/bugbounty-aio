@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
 import asyncio
 import socket
@@ -337,13 +337,13 @@ async def run_tool(body: dict):
 
     # Choose image & command
     if tool == "subfinder":
-        image = "ghcr.io/projectdiscovery/subfinder:latest"
+        image = "projectdiscovery/subfinder:latest"
         # Subfinder writes output to /data/output/subfinder_subs.txt
         cmd = ["-d", target, "-o", "/data/output/subfinder_subs.txt", "-silent"]
         stdout_file = log_path
 
     elif tool == "naabu":
-        image = "ghcr.io/projectdiscovery/naabu:latest"
+        image = "projectdiscovery/naabu:latest"
         if input_file:
             # allow host-style path (/data/jobs/...) — inside container it will be under /data/...
             in_container = input_file
@@ -357,7 +357,7 @@ async def run_tool(body: dict):
         stdout_file = log_path
 
     elif tool == "httpx":
-        image = "ghcr.io/projectdiscovery/httpx:latest"
+        image = "projectdiscovery/httpx:latest"
         if input_file:
             in_container = input_file
             cmd = ["-l", in_container, "-o", "/data/output/httpx.out"]
@@ -366,7 +366,7 @@ async def run_tool(body: dict):
         stdout_file = log_path
 
     elif tool == "nuclei":
-        image = "ghcr.io/projectdiscovery/nuclei:latest"
+        image = "projectdiscovery/nuclei:latest"
         if input_file:
             in_container = input_file
             cmd = ["-l", in_container, "-o", "/data/output/nuclei.out"]
@@ -374,16 +374,37 @@ async def run_tool(body: dict):
             cmd = ["-u", target, "-o", "/data/output/nuclei.out"]
         stdout_file = log_path
 
-    # Run the container and capture logs
-    exit_code, logs = run_container_and_stream(image, cmd, stdout_to_file=stdout_file, timeout=1800)
+    # Run the container and capture logs, but wrap in try/except to return JSON on errors
+    try:
+        # best-effort pull (image may already exist)
+        client = get_docker_client()
+        try:
+            client.images.pull(image)
+        except Exception:
+            # ignore pull errors; run_container_and_stream will surface errors
+            pass
 
-    return JSONResponse({
-        "job_id": job_id,
-        "tool": tool,
-        "exit_code": exit_code,
-        "out_dir": job_base,
-        "log": logs
-    })
+        exit_code, logs = run_container_and_stream(image, cmd, stdout_to_file=stdout_file, timeout=1800)
+        return JSONResponse({
+            "job_id": job_id,
+            "tool": tool,
+            "exit_code": exit_code,
+            "out_dir": job_base,
+            "log": logs
+        })
+    except Exception as e:
+        # collect small log snippet if available
+        snippet = ""
+        try:
+            if os.path.exists(log_path):
+                with open(log_path, "r", encoding="utf-8") as fh:
+                    snippet = fh.read()[-2000:]
+        except Exception:
+            snippet = ""
+        return JSONResponse(
+            {"job_id": job_id, "tool": tool, "error": str(e), "log_snippet": snippet},
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
 
 @app.get("/jobs/list/{target}")
 async def list_jobs(target: str):
@@ -422,3 +443,4 @@ async def get_job_file(path: str):
 
 # ---------- Serve the UI at /app ----------
 app.mount("/app", StaticFiles(directory="web", html=True), name="app")
+
