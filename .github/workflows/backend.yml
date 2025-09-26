@@ -44,11 +44,11 @@ jobs:
             -e APP_VERSION=${{ github.sha }} backend:test
           # wait for it to come up
           for i in {1..20}; do
-            curl -fsS http://localhost:8000/health && break || sleep 2
+            curl -fsS http://localhost:8080/health && break || sleep 2
           done
 
       - name: Smoke check /health
-        run: curl -fsS http://localhost:8000/health | tee /dev/stderr | grep -q '"status":"ok"'
+        run: curl -fsS http://localhost:8080/health | tee /dev/stderr | grep -q '"status":"ok"'
 
       - name: Stop container
         if: always()

@@ -7,4 +7,42 @@ services:
     container_name: bugbounty-aio_api
     ports:
       - "8080:8080"
+    volumes:
+      - ./data:/data                      # shared host folder for outputs/jobs
+      - /var/run/docker.sock:/var/run/docker.sock:ro  # allow API to control Docker (read-only socket mount)
     restart: unless-stopped
+
+  # Optional idle containers for ProjectDiscovery tools.
+  # They are started in "sleep infinity" mode so Portainer shows them.
+  # The API can also run these images on-demand (you can remove these if you prefer to run images dynamically).
+  subfinder:
+    image: ghcr.io/projectdiscovery/subfinder:latest
+    container_name: bugbounty-subfinder
+    entrypoint: ["/bin/sh", "-c", "sleep infinity"]
+    volumes:
+      - ./data:/data
+    restart: "no"
+
+  naabu:
+    image: ghcr.io/projectdiscovery/naabu:latest
+    container_name: bugbounty-naabu
+    entrypoint: ["/bin/sh", "-c", "sleep infinity"]
+    volumes:
+      - ./data:/data
+    restart: "no"
+
+  httpx:
+    image: ghcr.io/projectdiscovery/httpx:latest
+    container_name: bugbounty-httpx
+    entrypoint: ["/bin/sh", "-c", "sleep infinity"]
+    volumes:
+      - ./data:/data
+    restart: "no"
+
+  nuclei:
+    image: ghcr.io/projectdiscovery/nuclei:latest
+    container_name: bugbounty-nuclei
+    entrypoint: ["/bin/sh", "-c", "sleep infinity"]
+    volumes:
+      - ./data:/data
+    restart: "no"

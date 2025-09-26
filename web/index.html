@@ -22,10 +22,16 @@
     .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
     .k{color:#93c5fd}.v{color:#fca5a5}
     .ok{color:var(--ok)} .warn{color:var(--warn)} .err{color:var(--err)}
+    .tools-row{display:grid;grid-template-columns:1fr 320px;gap:12px;align-items:start}
+    .small{font-size:13px;color:var(--muted)}
+    a.file-link{color:var(--accent);text-decoration:none;margin-right:8px}
+    .log{max-height:320px;overflow:auto;background:#071022;padding:8px;border-radius:8px;border:1px solid #1f2a3a}
   </style>
 </head>
 <body>
   <div class="wrap">
+
+    <!-- Recon UI (unchanged) -->
     <div class="card">
       <h1>BugBounty AIO <span class="pill">Tool Pack A</span></h1>
       <div class="muted">Lightweight recon: WHOIS, DNS, quick TCP connect, Sublist3r, HTTP(S) liveness.</div>
@@ -59,13 +65,44 @@
       </div>
     </div>
 
-    <div id="results" class="grid">
-      <div class="card"><h3>Summary</h3><div id="summary" class="muted">No data yet.</div></div>
-      <div class="card"><h3>Open Ports</h3><div id="portsBox" class="muted">No data yet.</div></div>
-      <div class="card"><h3>WHOIS</h3><pre id="whois" class="muted">No data yet.</pre></div>
-      <div class="card"><h3>Apex A Records</h3><pre id="apex" class="muted">No data yet.</pre></div>
-      <div class="card"><h3>Subdomains</h3><pre id="subs" class="muted">No data yet.</pre></div>
-      <div class="card"><h3>Alive Endpoints</h3><pre id="alive" class="muted">No data yet.</pre></div>
+    <!-- Tools + Results -->
+    <div class="tools-row" style="margin-bottom:18px">
+      <div class="card">
+        <h3>Tool Runner</h3>
+        <div style="display:flex;gap:10px;align-items:center;margin-bottom:8px">
+          <input id="toolTarget" placeholder="target domain (example.com)" />
+          <select id="toolSelect" style="width:180px">
+            <option value="subfinder">subfinder (subdomains)</option>
+            <option value="naabu">naabu (fast ports)</option>
+            <option value="httpx">httpx (http probe)</option>
+            <option value="nuclei">nuclei (templates)</option>
+          </select>
+          <button id="runToolBtn">Run Tool</button>
+        </div>
+
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+          <button id="runFullScan">Run Full Scan (subfinder → naabu → httpx → nuclei)</button>
+          <div class="small">Jobs stored under <code>/data/jobs/</code> on host</div>
+        </div>
+
+        <div class="small" style="margin-bottom:6px">Latest output</div>
+        <pre id="toolOutput" class="log">No tool output yet.</pre>
+
+        <div style="margin-top:10px">
+          <strong>Jobs</strong>
+          <div id="jobLinks" class="small" style="margin-top:8px">No jobs yet.</div>
+        </div>
+      </div>
+
+      <!-- Existing results grid -->
+      <div id="results" class="grid">
+        <div class="card"><h3>Summary</h3><div id="summary" class="muted">No data yet.</div></div>
+        <div class="card"><h3>Open Ports</h3><div id="portsBox" class="muted">No data yet.</div></div>
+        <div class="card"><h3>WHOIS</h3><pre id="whois" class="muted">No data yet.</pre></div>
+        <div class="card"><h3>Apex A Records</h3><pre id="apex" class="muted">No data yet.</pre></div>
+        <div class="card"><h3>Subdomains</h3><pre id="subs" class="muted">No data yet.</pre></div>
+        <div class="card"><h3>Alive Endpoints</h3><pre id="alive" class="muted">No data yet.</pre></div>
+      </div>
     </div>
 
     <div class="card">
@@ -75,9 +112,10 @@
   </div>
 
   <script>
-    const $ = (id)=>document.getElementById(id);
-    const fmt = (o)=>JSON.stringify(o, null, 2);
+    const $ = id => document.getElementById(id);
+    const fmt = o => JSON.stringify(o, null, 2);
 
+    /* ---------------- Recon ---------------- */
     async function runRecon(){
       const domain = $('domain').value.trim();
       const top_ports = parseInt($('ports').value,10);
@@ -118,8 +156,132 @@
     }
 
     $('run').addEventListener('click', runRecon);
-    // Enter to submit:
     $('domain').addEventListener('keydown', (e)=>{ if(e.key==='Enter') runRecon(); });
+
+    /* ---------------- Tool runner ---------------- */
+    async function apiPost(path, body){
+      const res = await fetch(path, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body)
+      });
+      return res.json();
+    }
+
+    async function runTool(tool, target, input_file = null){
+      $('toolOutput').textContent = `Starting ${tool} on ${target}...\n`;
+      try {
+        const payload = { tool, target };
+        if(input_file) payload.input_file = input_file;
+        const resp = await apiPost('/run/tool', payload);
+        // API returns "log" and job metadata
+        const header = `=== ${tool} (job ${resp.job_id}) exit=${resp.exit_code} ===\n`;
+        $('toolOutput').textContent = header + (resp.log || '') + '\n';
+        await refreshJobs(target);
+        return resp;
+      } catch(e){
+        $('toolOutput').textContent = "Error: " + e;
+        return null;
+      }
+    }
+
+    $('runToolBtn').addEventListener('click', ()=> {
+      const tool = $('toolSelect').value;
+      const target = $('toolTarget').value.trim() || $('domain').value.trim();
+      if(!target){ $('toolOutput').textContent = 'Enter a target domain first.'; return; }
+      runTool(tool, target);
+    });
+
+    /* Full scan: run subfinder -> naabu -> httpx -> nuclei */
+    $('runFullScan').addEventListener('click', async ()=>{
+      const target = $('toolTarget').value.trim() || $('domain').value.trim();
+      if(!target){ $('toolOutput').textContent = 'Enter a target domain first.'; return; }
+      $('toolOutput').textContent = `Starting full scan for ${target}...\n`;
+
+      // 1) subfinder
+      const subResp = await runTool('subfinder', target);
+      if(!subResp){ $('toolOutput').textContent += '\nsubfinder failed; aborting.'; return; }
+
+      // get latest jobs for the target
+      let jobs = await fetch(`/jobs/list/${encodeURIComponent(target)}`).then(r=>r.json());
+      if(!jobs.jobs || jobs.jobs.length === 0){
+        $('toolOutput').textContent += '\nNo job output found for subfinder; aborting.';
+        return;
+      }
+      // assume latest job is first (server returns sorted reverse)
+      const latest = jobs.jobs[0];
+      const subsFile = `/data/jobs/${latest.job}/output/subfinder_subs.txt`;
+
+      // 2) naabu (use subsFile)
+      $('toolOutput').textContent += `\nRunning naabu with input ${subsFile} ...\n`;
+      const naabuResp = await runTool('naabu', target, subsFile);
+      if(!naabuResp){ $('toolOutput').textContent += '\nnaabu failed; continuing to httpx.'; }
+
+      // 3) httpx (use subsFile)
+      $('toolOutput').textContent += `\nRunning httpx with input ${subsFile} ...\n`;
+      const httpxResp = await runTool('httpx', target, subsFile);
+      if(!httpxResp){ $('toolOutput').textContent += '\nhttpx failed; continuing to nuclei.'; }
+
+      // 4) nuclei (use httpx output path if exists)
+      // assume httpx wrote to /data/jobs/<job>/output/httpx.out in the same job folder as naabu/nuclei output
+      let httpxOut = `/data/jobs/${latest.job}/output/httpx.out`;
+      $('toolOutput').textContent += `\nRunning nuclei with input ${httpxOut} ...\n`;
+      const nucleiResp = await runTool('nuclei', target, httpxOut);
+      if(!nucleiResp){ $('toolOutput').textContent += '\nnuclei failed or produced no output.'; }
+
+      $('toolOutput').textContent += '\nFull scan complete.\n';
+      await refreshJobs(target);
+    });
+
+    /* ---------------- Jobs listing / file links ---------------- */
+    async function refreshJobs(target){
+      const r = await fetch(`/jobs/list/${encodeURIComponent(target)}`);
+      const json = await r.json();
+      const div = $('jobLinks');
+      div.innerHTML = '';
+      if(!json.jobs || json.jobs.length===0){
+        div.textContent = 'No jobs yet.';
+        return;
+      }
+      json.jobs.forEach(j=>{
+        const wrapper = document.createElement('div');
+        wrapper.style.marginBottom = '10px';
+        const title = document.createElement('div');
+        title.innerHTML = `<strong>${j.job}</strong>`;
+        wrapper.appendChild(title);
+
+        const list = document.createElement('div');
+        list.style.marginTop = '6px';
+        j.files.forEach(f=>{
+          const a = document.createElement('a');
+          // Build path param for /jobs/file
+          const fullPath = `${j.path}/${f}`;
+          a.href = `/jobs/file?path=${encodeURIComponent(fullPath)}`;
+          a.textContent = f;
+          a.className = 'file-link';
+          a.target = '_blank';
+          list.appendChild(a);
+        });
+        wrapper.appendChild(list);
+        div.appendChild(wrapper);
+      });
+    }
+
+    // Refresh jobs when user changes target or domain
+    $('toolTarget').addEventListener('blur', ()=> {
+      const t = $('toolTarget').value.trim() || $('domain').value.trim();
+      if(t) refreshJobs(t);
+    });
+    $('domain').addEventListener('blur', ()=> {
+      const t = $('toolTarget').value.trim() || $('domain').value.trim();
+      if(t) refreshJobs(t);
+    });
+
+    // On load, try to populate jobs for domain field
+    window.addEventListener('load', ()=> {
+      const t = $('toolTarget').value.trim() || $('domain').value.trim();
+      if(t) refreshJobs(t);
+    });
   </script>
 </body>
 </html>
