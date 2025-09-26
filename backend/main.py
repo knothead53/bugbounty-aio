@@ -5,7 +5,7 @@ import json
 import os
 
 APP_NAME = "Bug Bounty AIO"
-DEFAULT_SETTINGS_PATH = Path("/app/settings.json")
+DEFAULT_SETTINGS_PATH = Path("/app/config/settings.json")
 
 def load_settings(path: Path = DEFAULT_SETTINGS_PATH) -> dict:
     if path.exists():
