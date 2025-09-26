@@ -14,6 +14,7 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 
 # Copy app code
 COPY backend /app/backend
+COPY web /app/web
 
 # Expose app
 EXPOSE 8080

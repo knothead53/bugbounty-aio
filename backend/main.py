@@ -13,6 +13,9 @@ import aiohttp
 # Sublist3r imports
 from sublist3r import main as sublist3r_main
 
+# Static files serving for the UI
+from fastapi.staticfiles import StaticFiles
+
 app = FastAPI(title="BugBounty-AIO", version="0.1.0")
 
 class ReconRequest(BaseModel):
@@ -151,3 +154,8 @@ async def recon(req: ReconRequest):
             "Next steps: add naabu/httpx/nuclei/katana as separate services or a tool-runner container."
         ]
     }
+
+# --- Serve the UI at /app ---
+# This mounts the `web` directory (relative to working directory) and serves index.html as static.
+# Make sure your Dockerfile copies the `web` folder into the image at /app/web (or the working dir you use).
+app.mount("/app", StaticFiles(directory="web", html=True), name="app")

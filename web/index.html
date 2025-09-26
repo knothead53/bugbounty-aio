@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>BugBounty AIO – Recon</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root{--bg:#0f172a;--card:#111827;--text:#e5e7eb;--muted:#9ca3af;--accent:#22d3ee;--ok:#22c55e;--warn:#f59e0b;--err:#ef4444}
+    body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 system-ui,Segoe UI,Roboto,Helvetica,Arial}
+    .wrap{max-width:980px;margin:32px auto;padding:0 16px}
+    .card{background:var(--card);border-radius:14px;box-shadow:0 10px 30px rgba(0,0,0,.25);padding:20px;margin-bottom:18px}
+    h1{margin:0 0 6px;font-size:28px}
+    .muted{color:var(--muted)}
+    label{display:block;margin:10px 0 6px}
+    input,select,button{background:#0b1220;color:var(--text);border:1px solid #293244;border-radius:10px;padding:10px 12px}
+    input,select{width:100%}
+    button{cursor:pointer}
+    .row{display:grid;grid-template-columns:2fr 1fr 1fr;gap:12px}
+    .actions{display:flex;gap:10px;margin-top:14px}
+    .pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;border:1px solid #334155;color:#cbd5e1}
+    pre{white-space:pre-wrap;word-break:break-word;background:#0b1220;border:1px solid #293244;border-radius:10px;padding:12px;overflow:auto}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    .k{color:#93c5fd}.v{color:#fca5a5}
+    .ok{color:var(--ok)} .warn{color:var(--warn)} .err{color:var(--err)}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>BugBounty AIO <span class="pill">Tool Pack A</span></h1>
+      <div class="muted">Lightweight recon: WHOIS, DNS, quick TCP connect, Sublist3r, HTTP(S) liveness.</div>
+      <div class="row" style="margin-top:14px">
+        <div>
+          <label>Domain</label>
+          <input id="domain" placeholder="example.com" />
+        </div>
+        <div>
+          <label>Top ports</label>
+          <select id="ports">
+            <option value="20">20</option>
+            <option value="40" selected>40</option>
+            <option value="60">60</option>
+            <option value="80">80</option>
+          </select>
+        </div>
+        <div>
+          <label>HTTP timeout (ms)</label>
+          <select id="timeout">
+            <option value="1500">1500</option>
+            <option value="2000" selected>2000</option>
+            <option value="3000">3000</option>
+            <option value="5000">5000</option>
+          </select>
+        </div>
+      </div>
+      <div class="actions">
+        <button id="run">Run Recon</button>
+        <div id="status" class="muted"></div>
+      </div>
+    </div>
+
+    <div id="results" class="grid">
+      <div class="card"><h3>Summary</h3><div id="summary" class="muted">No data yet.</div></div>
+      <div class="card"><h3>Open Ports</h3><div id="portsBox" class="muted">No data yet.</div></div>
+      <div class="card"><h3>WHOIS</h3><pre id="whois" class="muted">No data yet.</pre></div>
+      <div class="card"><h3>Apex A Records</h3><pre id="apex" class="muted">No data yet.</pre></div>
+      <div class="card"><h3>Subdomains</h3><pre id="subs" class="muted">No data yet.</pre></div>
+      <div class="card"><h3>Alive Endpoints</h3><pre id="alive" class="muted">No data yet.</pre></div>
+    </div>
+
+    <div class="card">
+      <h3>Raw JSON</h3>
+      <pre id="raw" class="muted">No data yet.</pre>
+    </div>
+  </div>
+
+  <script>
+    const $ = (id)=>document.getElementById(id);
+    const fmt = (o)=>JSON.stringify(o, null, 2);
+
+    async function runRecon(){
+      const domain = $('domain').value.trim();
+      const top_ports = parseInt($('ports').value,10);
+      const alive_timeout_ms = parseInt($('timeout').value,10);
+
+      if(!domain){ $('status').textContent = 'Please enter a domain.'; return; }
+
+      $('status').textContent = 'Running…';
+      const started = performance.now();
+      try{
+        const res = await fetch('/recon', {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({domain, top_ports, alive_timeout_ms})
+        });
+        const data = await res.json();
+
+        $('raw').textContent = fmt(data);
+        $('whois').textContent = fmt(data.whois || {});
+        $('apex').textContent = (data.apex_A && data.apex_A.length) ? data.apex_A.join('\n') : '—';
+        $('subs').textContent = (data.subdomains && data.subdomains.length) ? data.subdomains.join('\n') : '—';
+        $('alive').textContent = (data.alive_endpoints && data.alive_endpoints.length)
+          ? data.alive_endpoints.map(a=>`${a.url}  [${a.status} ${a.reason}]`).join('\n') : '—';
+        $('portsBox').textContent = (data.open_ports_tcp_connect && data.open_ports_tcp_connect.length)
+          ? data.open_ports_tcp_connect.join(', ') : '—';
+
+        $('summary').innerHTML =
+          `<div><span class="k">Target</span>: <span class="v">${data.target}</span></div>
+           <div><span class="k">Subdomains</span>: <span class="v">${data.subdomains_count}</span></div>
+           <div><span class="k">Alive endpoints</span>: <span class="v">${(data.alive_endpoints||[]).length}</span></div>`;
+
+        const ms = Math.round(performance.now()-started);
+        $('status').innerHTML = `<span class="ok">Done</span> in ${ms} ms`;
+      }catch(e){
+        $('status').innerHTML = `<span class="err">Failed</span>`;
+        $('raw').textContent = String(e);
+      }
+    }
+
+    $('run').addEventListener('click', runRecon);
+    // Enter to submit:
+    $('domain').addEventListener('keydown', (e)=>{ if(e.key==='Enter') runRecon(); });
+  </script>
+</body>
+</html>
