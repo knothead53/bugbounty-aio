@@ -7,3 +7,4 @@ sublist3r==1.0
 python-whois==0.8.0
 docker==6.1.3
 requests==2.31.0
+reportlab>=4.0

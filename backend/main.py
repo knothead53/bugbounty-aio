@@ -26,6 +26,12 @@ from urllib.parse import quote_plus
 import docker as docker_sdk
 from fastapi.responses import StreamingResponse, JSONResponse
 
+# PDF generation
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.units import inch
+
 app = FastAPI(title="BugBounty-AIO", version="0.1.0")
 
 class ReconRequest(BaseModel):
@@ -327,73 +333,88 @@ async def run_tool(body: dict):
     if tool not in ("subfinder", "naabu", "httpx", "nuclei"):
         raise HTTPException(status_code=400, detail="unsupported tool")
 
+    # Default: create a fresh job folder for this run
     job_id = str(uuid.uuid4())[:8]
     job_base = f"/data/jobs/{target}_{job_id}"
     output_dir = os.path.join(job_base, "output")
     os.makedirs(output_dir, exist_ok=True)
 
-    # compute log file path
+    # If an input_file from an earlier job is provided and it lives under /data/jobs/<job>/,
+    # reuse that job folder so subsequent outputs land in the same place.
+    if input_file and isinstance(input_file, str) and input_file.startswith("/data/jobs/"):
+        try:
+            normalized = os.path.abspath(input_file)
+            parts = normalized.split(os.sep)
+            # parts: ['', 'data', 'jobs', '<jobname>', 'output', 'file']
+            if "jobs" in parts:
+                idx = parts.index("jobs")
+                if idx + 1 < len(parts):
+                    jobname = parts[idx + 1]
+                    job_base = os.path.join("/data", "jobs", jobname)
+                    output_dir = os.path.join(job_base, "output")
+                    os.makedirs(output_dir, exist_ok=True)
+        except Exception:
+            # fallback to fresh job (already created)
+            pass
+
+    # compute log file path (in chosen job folder)
     log_path = os.path.join(job_base, f"{tool}.log")
 
-    # Choose image & command
+    # Build per-job container output paths (container uses /data root)
+    # so inside container we write to /data/jobs/<job>/output/...
     if tool == "subfinder":
         image = "projectdiscovery/subfinder:latest"
-        # Subfinder writes output to /data/output/subfinder_subs.txt
-        cmd = ["-d", target, "-o", "/data/output/subfinder_subs.txt", "-silent"]
-        stdout_file = log_path
+        container_out = os.path.join(job_base, "output", "subfinder_subs.txt")
+        cmd = ["-d", target, "-o", container_out, "-silent"]
 
     elif tool == "naabu":
         image = "projectdiscovery/naabu:latest"
+        container_out = os.path.join(job_base, "output", "naabu.out")
         if input_file:
-            # allow host-style path (/data/jobs/...) — inside container it will be under /data/...
             in_container = input_file
-            if in_container.startswith("/data/jobs/"):
-                # map host path to container path: replace leading /data/jobs/<jobname>/ to /data/jobs/<jobname>/
-                # container has entire /data mounted, so absolute path is valid inside container
-                pass
-            cmd = ["-list", in_container, "-o", "/data/output/naabu.out"]
+            # leave input path as-is (it should be an absolute /data/jobs/... path)
+            cmd = ["-list", in_container, "-o", container_out]
         else:
-            cmd = ["-host", target, "-o", "/data/output/naabu.out"]
-        stdout_file = log_path
+            cmd = ["-host", target, "-o", container_out]
 
     elif tool == "httpx":
         image = "projectdiscovery/httpx:latest"
+        container_out = os.path.join(job_base, "output", "httpx.out")
         if input_file:
             in_container = input_file
-            cmd = ["-l", in_container, "-o", "/data/output/httpx.out"]
+            cmd = ["-l", in_container, "-o", container_out]
         else:
-            cmd = ["-u", target, "-o", "/data/output/httpx.out"]
-        stdout_file = log_path
+            cmd = ["-u", target, "-o", container_out]
 
-    elif tool == "nuclei":
+    else:  # nuclei
         image = "projectdiscovery/nuclei:latest"
+        container_out = os.path.join(job_base, "output", "nuclei.out")
+        # nuclei expects a list (-l) or single target (-u)
         if input_file:
             in_container = input_file
-            cmd = ["-l", in_container, "-o", "/data/output/nuclei.out"]
+            cmd = ["-l", in_container, "-o", container_out]
         else:
-            cmd = ["-u", target, "-o", "/data/output/nuclei.out"]
-        stdout_file = log_path
+            cmd = ["-u", target, "-o", container_out]
 
-    # Run the container and capture logs, but wrap in try/except to return JSON on errors
+    # Run and capture logs — wrap with try/except to return JSON on errors
     try:
-        # best-effort pull (image may already exist)
         client = get_docker_client()
         try:
             client.images.pull(image)
         except Exception:
-            # ignore pull errors; run_container_and_stream will surface errors
+            # ignore pull errors here; run_container_and_stream will surface issues
             pass
 
-        exit_code, logs = run_container_and_stream(image, cmd, stdout_to_file=stdout_file, timeout=1800)
+        exit_code, logs = run_container_and_stream(image, cmd, stdout_to_file=log_path, timeout=1800)
+
         return JSONResponse({
-            "job_id": job_id,
+            "job_id": os.path.basename(job_base),
             "tool": tool,
             "exit_code": exit_code,
             "out_dir": job_base,
             "log": logs
         })
     except Exception as e:
-        # collect small log snippet if available
         snippet = ""
         try:
             if os.path.exists(log_path):
@@ -402,9 +423,173 @@ async def run_tool(body: dict):
         except Exception:
             snippet = ""
         return JSONResponse(
-            {"job_id": job_id, "tool": tool, "error": str(e), "log_snippet": snippet},
+            {"job_id": os.path.basename(job_base), "tool": tool, "error": str(e), "log_snippet": snippet},
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
+
+# ---------- Pipeline runner + PDF report generator ----------
+def generate_pdf_report(job_base: str, target: str, summary: Dict) -> str:
+    """
+    Create a simple PDF summary at job_base/output/report.pdf.
+    summary is a dict with keys 'tools' -> list of {tool, exit_code, log, out_file}
+    Returns path to generated PDF.
+    """
+    output_dir = os.path.join(job_base, "output")
+    os.makedirs(output_dir, exist_ok=True)
+    pdf_path = os.path.join(output_dir, "report.pdf")
+
+    doc = SimpleDocTemplate(pdf_path, pagesize=letter,
+                            rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40)
+    styles = getSampleStyleSheet()
+    story = []
+
+    # Title
+    story.append(Paragraph(f"BugBounty-AIO Report — {target}", styles["Title"]))
+    story.append(Spacer(1, 12))
+    story.append(Paragraph(f"Job: {os.path.basename(job_base)}", styles["Normal"]))
+    story.append(Paragraph(f"Generated: {datetime.datetime.utcnow().isoformat()}Z", styles["Normal"]))
+    story.append(Spacer(1, 12))
+
+    # For each tool, include status + short log excerpt + show output file snippet (if present)
+    for t in summary.get("tools", []):
+        story.append(Paragraph(f"<b>{t.get('tool')}</b> — exit={t.get('exit_code')}", styles["Heading2"]))
+        # include small log snippet
+        log_snip = t.get("log", "")
+        if log_snip:
+            snippet = log_snip[-2000:] if len(log_snip) > 2000 else log_snip
+            # keep line breaks
+            snippet = snippet.replace("\n", "<br/>")
+            story.append(Paragraph(f"<i>Log (truncated)</i>:", styles["Normal"]))
+            story.append(Paragraph(snippet, styles["Code"]))
+            story.append(Spacer(1, 8))
+
+        # include the first lines of the primary output file if exists
+        out_file = t.get("out_file")
+        if out_file and os.path.isfile(out_file):
+            try:
+                with open(out_file, "r", encoding="utf-8", errors="ignore") as fh:
+                    lines = fh.read().splitlines()
+                # add up to first 40 lines
+                display = "\n".join(lines[:40])
+                display = display.replace("\n", "<br/>")
+                story.append(Paragraph(f"<i>Output file:</i> {os.path.basename(out_file)}", styles["Normal"]))
+                story.append(Paragraph(display, styles["Code"]))
+                story.append(Spacer(1, 8))
+            except Exception:
+                pass
+
+    # final notes
+    story.append(Spacer(1, 14))
+    story.append(Paragraph("Notes:", styles["Heading3"]))
+    story.append(Paragraph("This report was generated by BugBounty-AIO. For full raw outputs check the job folder under /data/jobs.", styles["Normal"]))
+    doc.build(story)
+    return pdf_path
+
+@app.post("/run/pipeline")
+async def run_pipeline(body: dict):
+    """
+    Run the full pipeline sequentially in a single job folder:
+      subfinder -> naabu -> httpx -> nuclei
+    body: {"target": "example.com", "skip_tools": ["naabu"] (optional)}
+    Returns: JSON with job_id, out_dir, and per-tool results, plus path to generated PDF.
+    """
+    target = body.get("target")
+    if not target:
+        raise HTTPException(status_code=400, detail="target is required")
+
+    skip_tools = set(body.get("skip_tools") or [])
+    job_id = str(uuid.uuid4())[:8]
+    job_base = f"/data/jobs/{target}_{job_id}"
+    output_dir = os.path.join(job_base, "output")
+    os.makedirs(output_dir, exist_ok=True)
+
+    results = {"tools": []}
+
+    try:
+        # 1) subfinder
+        if "subfinder" not in skip_tools:
+            image = "projectdiscovery/subfinder:latest"
+            sub_out = os.path.join(job_base, "output", "subfinder_subs.txt")
+            cmd = ["-d", target, "-o", sub_out, "-silent"]
+            rc, logs = run_container_and_stream(image, cmd, stdout_to_file=os.path.join(job_base, "subfinder.log"), timeout=1800)
+            results["tools"].append({"tool": "subfinder", "exit_code": rc, "log": logs, "out_file": sub_out})
+        else:
+            sub_out = None
+
+        # 2) naabu (use subfinder output if present)
+        if "naabu" not in skip_tools:
+            image = "projectdiscovery/naabu:latest"
+            naabu_out = os.path.join(job_base, "output", "naabu.out")
+            if sub_out and os.path.isfile(sub_out):
+                cmd = ["-list", sub_out, "-o", naabu_out]
+            else:
+                cmd = ["-host", target, "-o", naabu_out]
+            rc, logs = run_container_and_stream(image, cmd, stdout_to_file=os.path.join(job_base, "naabu.log"), timeout=1800)
+            results["tools"].append({"tool": "naabu", "exit_code": rc, "log": logs, "out_file": naabu_out})
+        else:
+            naabu_out = None
+
+        # 3) httpx (probe hosts; prefer subfinder list)
+        if "httpx" not in skip_tools:
+            image = "projectdiscovery/httpx:latest"
+            httpx_out = os.path.join(job_base, "output", "httpx.out")
+            # prefer the subfinder list if present (it contains hostnames)
+            if sub_out and os.path.isfile(sub_out):
+                cmd = ["-l", sub_out, "-o", httpx_out]
+            elif naabu_out and os.path.isfile(naabu_out):
+                cmd = ["-l", naabu_out, "-o", httpx_out]
+            else:
+                cmd = ["-u", target, "-o", httpx_out]
+            rc, logs = run_container_and_stream(image, cmd, stdout_to_file=os.path.join(job_base, "httpx.log"), timeout=1800)
+            results["tools"].append({"tool": "httpx", "exit_code": rc, "log": logs, "out_file": httpx_out})
+        else:
+            httpx_out = None
+
+        # 4) nuclei (use httpx output if present, else subfinder list)
+        if "nuclei" not in skip_tools:
+            image = "projectdiscovery/nuclei:latest"
+            nuclei_out = os.path.join(job_base, "output", "nuclei.out")
+            if httpx_out and os.path.isfile(httpx_out):
+                cmd = ["-l", httpx_out, "-o", nuclei_out]
+            elif sub_out and os.path.isfile(sub_out):
+                cmd = ["-l", sub_out, "-o", nuclei_out]
+            else:
+                cmd = ["-u", target, "-o", nuclei_out]
+            rc, logs = run_container_and_stream(image, cmd, stdout_to_file=os.path.join(job_base, "nuclei.log"), timeout=1800)
+            results["tools"].append({"tool": "nuclei", "exit_code": rc, "log": logs, "out_file": nuclei_out})
+        else:
+            nuclei_out = None
+
+        # Generate PDF summary
+        summary = {"target": target, "tools": results["tools"]}
+        try:
+            pdf_path = generate_pdf_report(job_base, target, summary)
+        except Exception as e:
+            # continue but note PDF generation failed
+            pdf_path = None
+            results.setdefault("warnings", []).append(f"PDF generation failed: {e}")
+
+        return JSONResponse({
+            "job_id": os.path.basename(job_base),
+            "out_dir": job_base,
+            "tools": results["tools"],
+            "report": pdf_path
+        })
+
+    except Exception as e:
+        # best-effort snippet
+        snippet = ""
+        try:
+            # look for any logs in the job output dir
+            for fname in ("subfinder.log","naabu.log","httpx.log","nuclei.log"):
+                p = os.path.join(job_base, fname)
+                if os.path.exists(p):
+                    with open(p, "r", encoding="utf-8", errors="ignore") as fh:
+                        snippet = fh.read()[-2000:]
+                        break
+        except Exception:
+            snippet = ""
+        return JSONResponse({"error": str(e), "log_snippet": snippet}, status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 @app.get("/jobs/list/{target}")
 async def list_jobs(target: str):

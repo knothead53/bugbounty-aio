@@ -26,12 +26,14 @@
     .small{font-size:13px;color:var(--muted)}
     a.file-link{color:var(--accent);text-decoration:none;margin-right:8px}
     .log{max-height:320px;overflow:auto;background:#071022;padding:8px;border-radius:8px;border:1px solid #1f2a3a}
+    .btn-secondary{background:transparent;border:1px solid #334155;padding:8px 10px;border-radius:8px;color:var(--text)}
+    .disabled{opacity:.5;pointer-events:none}
   </style>
 </head>
 <body>
   <div class="wrap">
 
-    <!-- Recon UI (unchanged) -->
+    <!-- Recon UI -->
     <div class="card">
       <h1>BugBounty AIO <span class="pill">Tool Pack A</span></h1>
       <div class="muted">Lightweight recon: WHOIS, DNS, quick TCP connect, Sublist3r, HTTP(S) liveness.</div>
@@ -91,6 +93,10 @@
         <div style="margin-top:10px">
           <strong>Jobs</strong>
           <div id="jobLinks" class="small" style="margin-top:8px">No jobs yet.</div>
+        </div>
+
+        <div id="reportArea" style="margin-top:12px;display:block">
+          <!-- PDF link(s) will be injected here -->
         </div>
       </div>
 
@@ -158,14 +164,20 @@
     $('run').addEventListener('click', runRecon);
     $('domain').addEventListener('keydown', (e)=>{ if(e.key==='Enter') runRecon(); });
 
-    /* ---------------- Tool runner ---------------- */
+    /* ---------------- Tool runner / pipeline ---------------- */
     async function apiPost(path, body){
       const res = await fetch(path, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(body)
       });
-      return res.json();
+      // Try to decode JSON, but provide clear error handling
+      const text = await res.text();
+      try {
+        return JSON.parse(text);
+      } catch (err) {
+        return { error: `Invalid JSON response from server (status ${res.status}).`, raw: text };
+      }
     }
 
     async function runTool(tool, target, input_file = null){
@@ -174,10 +186,13 @@
         const payload = { tool, target };
         if(input_file) payload.input_file = input_file;
         const resp = await apiPost('/run/tool', payload);
-        // API returns "log" and job metadata
-        const header = `=== ${tool} (job ${resp.job_id}) exit=${resp.exit_code} ===\n`;
-        $('toolOutput').textContent = header + (resp.log || '') + '\n';
-        await refreshJobs(target);
+        if(resp.error){
+          $('toolOutput').textContent = `Error: ${resp.error}\n${resp.log_snippet||''}`;
+        } else {
+          const header = `=== ${tool} (job ${resp.job_id}) exit=${resp.exit_code} ===\n`;
+          $('toolOutput').textContent = header + (resp.log || '') + '\n';
+          await refreshJobs(target);
+        }
         return resp;
       } catch(e){
         $('toolOutput').textContent = "Error: " + e;
@@ -192,45 +207,77 @@
       runTool(tool, target);
     });
 
-    /* Full scan: run subfinder -> naabu -> httpx -> nuclei */
+    /* ---------------- New: server-side pipeline via /run/pipeline ---------------- */
+    async function runPipeline(target){
+      // disable UI
+      $('runFullScan').classList.add('disabled');
+      $('toolOutput').textContent = `Starting full pipeline for ${target}...\nThis may take several minutes depending on target size.\n\n`;
+
+      try {
+        const resp = await apiPost('/run/pipeline', { target });
+
+        if(resp.error){
+          $('toolOutput').textContent += `Pipeline error: ${resp.error}\n${resp.log_snippet||''}`;
+          $('runFullScan').classList.remove('disabled');
+          return resp;
+        }
+
+        // Show per-tool results in the output area
+        if(Array.isArray(resp.tools)){
+          resp.tools.forEach(t => {
+            $('toolOutput').textContent += `\n--- ${t.tool} (exit=${t.exit_code}) ---\n`;
+            if(t.log) $('toolOutput').textContent += t.log + '\n';
+          });
+        }
+
+        // If the server produced a report path, turn that into clickable links
+        const reportPath = resp.report;
+        const outDir = resp.out_dir || '';
+        const jobId = resp.job_id || '';
+        const reportArea = $('reportArea');
+        reportArea.innerHTML = ''; // reset
+
+        if(reportPath){
+          // Build a safe download URL via /jobs/file endpoint
+          const url = `/jobs/file?path=${encodeURIComponent(reportPath)}`;
+          const openBtn = document.createElement('a');
+          openBtn.href = url;
+          openBtn.target = '_blank';
+          openBtn.className = 'btn-secondary';
+          openBtn.textContent = 'Open PDF';
+          openBtn.style.marginRight = '8px';
+
+          const dlBtn = document.createElement('a');
+          dlBtn.href = url;
+          dlBtn.className = 'btn-secondary';
+          dlBtn.textContent = 'Download PDF';
+          dlBtn.setAttribute('download', `bbug-${jobId || 'report'}.pdf`);
+
+          reportArea.appendChild(openBtn);
+          reportArea.appendChild(dlBtn);
+
+          $('toolOutput').textContent += `\nReport created: ${reportPath}\n`;
+        } else {
+          $('toolOutput').textContent += `\nNo PDF generated. Check job folder: ${outDir}\n`;
+        }
+
+        // Refresh job list
+        await refreshJobs(target);
+        $('runFullScan').classList.remove('disabled');
+        return resp;
+      } catch (err) {
+        $('toolOutput').textContent += `Pipeline failed: ${err}\n`;
+        $('runFullScan').classList.remove('disabled');
+        return null;
+      }
+    }
+
     $('runFullScan').addEventListener('click', async ()=>{
       const target = $('toolTarget').value.trim() || $('domain').value.trim();
       if(!target){ $('toolOutput').textContent = 'Enter a target domain first.'; return; }
-      $('toolOutput').textContent = `Starting full scan for ${target}...\n`;
-
-      // 1) subfinder
-      const subResp = await runTool('subfinder', target);
-      if(!subResp){ $('toolOutput').textContent += '\nsubfinder failed; aborting.'; return; }
-
-      // get latest jobs for the target
-      let jobs = await fetch(`/jobs/list/${encodeURIComponent(target)}`).then(r=>r.json());
-      if(!jobs.jobs || jobs.jobs.length === 0){
-        $('toolOutput').textContent += '\nNo job output found for subfinder; aborting.';
-        return;
-      }
-      // assume latest job is first (server returns sorted reverse)
-      const latest = jobs.jobs[0];
-      const subsFile = `/data/jobs/${latest.job}/output/subfinder_subs.txt`;
-
-      // 2) naabu (use subsFile)
-      $('toolOutput').textContent += `\nRunning naabu with input ${subsFile} ...\n`;
-      const naabuResp = await runTool('naabu', target, subsFile);
-      if(!naabuResp){ $('toolOutput').textContent += '\nnaabu failed; continuing to httpx.'; }
-
-      // 3) httpx (use subsFile)
-      $('toolOutput').textContent += `\nRunning httpx with input ${subsFile} ...\n`;
-      const httpxResp = await runTool('httpx', target, subsFile);
-      if(!httpxResp){ $('toolOutput').textContent += '\nhttpx failed; continuing to nuclei.'; }
-
-      // 4) nuclei (use httpx output path if exists)
-      // assume httpx wrote to /data/jobs/<job>/output/httpx.out in the same job folder as naabu/nuclei output
-      let httpxOut = `/data/jobs/${latest.job}/output/httpx.out`;
-      $('toolOutput').textContent += `\nRunning nuclei with input ${httpxOut} ...\n`;
-      const nucleiResp = await runTool('nuclei', target, httpxOut);
-      if(!nucleiResp){ $('toolOutput').textContent += '\nnuclei failed or produced no output.'; }
-
-      $('toolOutput').textContent += '\nFull scan complete.\n';
-      await refreshJobs(target);
+      // Clear previous report area
+      $('reportArea').innerHTML = '';
+      await runPipeline(target);
     });
 
     /* ---------------- Jobs listing / file links ---------------- */
@@ -254,7 +301,6 @@
         list.style.marginTop = '6px';
         j.files.forEach(f=>{
           const a = document.createElement('a');
-          // Build path param for /jobs/file
           const fullPath = `${j.path}/${f}`;
           a.href = `/jobs/file?path=${encodeURIComponent(fullPath)}`;
           a.textContent = f;
