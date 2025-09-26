@@ -1,23 +1,8 @@
-# BugBounty-AIO
+# Bug Bounty AIO
 
-Scaffold for a self-hosted bug bounty orchestration toolkit.
+Single service that will grow into an end-to-end bug bounty recon + reporting tool.
 
-This repo will evolve in small phases:
-- backend (FastAPI orchestrator)
-- frontend (React UI)
-- docker-compose
-- docs & setup guides
-
-## Repo Structure
-
-├── backend/ # FastAPI orchestrator
-│ ├── main.py
-│ ├── init.py
-│ └── requirements.txt
-├── frontend/ # React UI
-│ └── README.md
-├── compose/ # Docker orchestration
-│ └── docker-compose.yml
-├── docs/ # Documentation & guides
-├── .gitignore
-└── README.md
+## Run locally with Docker
+```bash
+docker compose up -d --build
+curl http://localhost:8080/health
