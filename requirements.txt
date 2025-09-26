@@ -1,2 +1,7 @@
-fastapi
-uvicorn[standard]
+fastapi==0.115.5
+uvicorn[standard]==0.30.6
+pydantic==2.9.2
+aiohttp==3.10.5
+dnspython==2.6.1
+sublist3r==1.0
+python-whois==0.8.0

@@ -1,21 +1,10 @@
-version: "3.8"
+version: "3.9"
 
 services:
-  aio:
-    container_name: bug-bounty-aio
+  api:
     build: .
-    restart: unless-stopped
-    environment:
-      - ENV=prod
+    image: bugbounty-aio:latest
+    container_name: bugbounty-aio_api
     ports:
       - "8080:8080"
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 5
-    volumes:
-      - aio-data:/app/data
-
-volumes:
-  aio-data:
+    restart: unless-stopped
