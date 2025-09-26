@@ -15,7 +15,6 @@ services:
       timeout: 5s
       retries: 5
     volumes:
-      - ./settings.json:/app/settings.json:ro
       - aio-data:/app/data
 
 volumes:
